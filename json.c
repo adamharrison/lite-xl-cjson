@@ -19,6 +19,13 @@ typedef enum json_error_e {
     JSON_ERROR_TRAILING_GARBAGE
 } json_error_e;
 
+typedef struct json_error_t {
+    json_error_e error;
+    int line;
+    int column;
+    int codepoint;
+} json_error_t;
+
 typedef enum json_type_e {
     JSON_NULL,
     JSON_ARRAY,
@@ -77,9 +84,6 @@ static void cjson_free(json_t* json) {
     }
 }
 
-static int cjson_encode(lua_State* L) {
-    return 1;
-}
 
 static void json_append(json_t* array, json_t* value) {
     assert(array->type == JSON_ARRAY);
@@ -204,9 +208,7 @@ static int codepoint_to_utf8(char* str, int codepoint) {
     return 0;
 }
 
-static int cjson_decode(lua_State* L) {
-    size_t len;
-    const char* str = luaL_checklstring(L, 1, &len);
+static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
     const char* end = str + len;
     int codepoint;
     int line = 1;
@@ -221,6 +223,8 @@ static int cjson_decode(lua_State* L) {
     char utf8_buffer[5] = {0};
     int utf8_buffer_length;
     json_t stack[MAX_DEPTH];
+    if (error)
+        error->error = JSON_ERROR_NONE;
 
     int slash_count = 0;
     int key = 0;
@@ -230,7 +234,7 @@ static int cjson_decode(lua_State* L) {
         if (next_str > end)
           break;
         #ifdef CJSON_DEBUG
-            fprintf(stderr, "CODE: %c %d %d %d\n", codepoint, depth, mode, stack[depth].type);
+            fprintf(stderr, "CODE: %c %d %d %d\n", codepoint, depth, mode, depth >= 0 ? stack[depth].type : -1);
         #endif
         int char_length = next_str - str;
         int newline = 0;
@@ -392,17 +396,18 @@ static int cjson_decode(lua_State* L) {
                             if (sscanf(utf8_buffer, "%x", &utf8_codepoint) == 1) {
                                 int length = codepoint_to_utf8(&buffer[buffer_length], utf8_codepoint);
                                 if (length > 0) {
+                                    fprintf(stderr, "BUF: %d %d\n", buffer[buffer_length], length);
                                     buffer_length += length;
                                     mode = MODE_STRING;
                                 } else
                                     err = JSON_ERROR_INVALID_UNICODE;
                             } else
-                                err = JSON_ERROR_INVALID_CHAR;
+                                err = JSON_ERROR_INVALID_UNICODE;
 
                         }
                     } break;
                     default:
-                        err = JSON_ERROR_INVALID_CHAR;
+                        err = JSON_ERROR_INVALID_UNICODE;
                 }
             } break;
             case MODE_KEY:
@@ -412,47 +417,52 @@ static int cjson_decode(lua_State* L) {
                     case '"':
                         if (slash_count % 2 == 0)
                             terminate = 1;
-                        slash_count = 0;
                     break;
                     case '\n': err = JSON_ERROR_INVALID_CHAR; break;
                     case '/':
-                        if (slash_count % 2 == 0)
+                        if (slash_count % 2 == 1)
                             buffer[buffer_length++] = '/';
-                        slash_count = 0;
+                        else
+                            buffer[buffer_length++] = codepoint;
                     break;
                     case 't':
-                        if (slash_count % 2 == 0)
+                        if (slash_count % 2 == 1)
                             buffer[buffer_length++] = '\t';
-                        slash_count = 0;
+                        else
+                            buffer[buffer_length++] = codepoint;
                     break;
                     case 'n':
-                        if (slash_count % 2 == 0)
+                        if (slash_count % 2 == 1)
                             buffer[buffer_length++] = '\n';
-                        slash_count = 0;
+                        else
+                            buffer[buffer_length++] = codepoint;
                     break;
                     case 'f':
-                        if (slash_count % 2 == 0)
+                        if (slash_count % 2 == 1)
                             buffer[buffer_length++] = '\f';
-                        slash_count = 0;
+                        else
+                            buffer[buffer_length++] = codepoint;
                     break;
                     case 'r':
-                        if (slash_count % 2 == 0)
+                        if (slash_count % 2 == 1)
                             buffer[buffer_length++] = '\r';
-                        slash_count = 0;
+                        else
+                            buffer[buffer_length++] = codepoint;
                     break;
                     case 'u':
                         if (slash_count % 2 == 1) {
                             utf8_buffer_length = 0;
                             mode = MODE_UTF8;
-                        } else {
-                            buffer[buffer_length++] = '\r';
-                        }
+                        } else
+                            buffer[buffer_length++] = codepoint;
                     break;
                     default:
                         memcpy(&buffer[buffer_length], str, char_length);
                         buffer_length += char_length;
                     break;
                 }
+                if (codepoint != '\\')
+                    slash_count = 0;
                 if (!err && terminate) {
                     json_str_append(&stack[depth], buffer, buffer_length);
                     if (mode == MODE_KEY) {
@@ -493,14 +503,17 @@ static int cjson_decode(lua_State* L) {
                     case '8':
                     case '9':
                         if (buffer_length > MAX_BUFFER)
-                            return luaL_error(L, "number too long");
-                        buffer[buffer_length++] = codepoint;
+                            err = JSON_ERROR_INVALID_NUMBER;
+                        else
+                            buffer[buffer_length++] = codepoint;
                     break;
                     case '.':
-                        if (stack[depth].type == JSON_DOUBLE)
-                            return luaL_error(L, "invalid character");
-                        stack[depth].type = JSON_DOUBLE;
-                        buffer[buffer_length++] = codepoint;
+                        if (stack[depth].type == JSON_DOUBLE) {
+                            err = JSON_ERROR_INVALID_NUMBER;
+                        } else {
+                            stack[depth].type = JSON_DOUBLE;
+                            buffer[buffer_length++] = codepoint;
+                        }
                     break;
                     case ',':
                         mode = MODE_VALUE;
@@ -541,6 +554,7 @@ static int cjson_decode(lua_State* L) {
                     if (depth > 1 && stack[depth - 1].type == JSON_STRING && stack[depth - 2].type == JSON_OBJECT) {
                         json_set(&stack[depth - 2], &stack[depth - 1], &stack[depth]);
                         --depth;
+                        key = 1;
                     } else if (stack[depth - 1].type == JSON_ARRAY) {
                         json_append(&stack[depth - 1], &stack[depth]);
                     } else
@@ -564,35 +578,31 @@ static int cjson_decode(lua_State* L) {
         else if (str < end)
             err = JSON_ERROR_TRAILING_GARBAGE;
     }
-    if (err != JSON_ERROR_NONE) {
-        for (int i = depth - 1; i > 0; --i)
-            cjson_free(&stack[i]);
-        switch (err) {
-            case JSON_ERROR_UNEXPECTED_END:
-                return luaL_error(L, "unexepcted end of json string");
-            case JSON_ERROR_INVALID_CHAR:
-                return luaL_error(L, "invalid character found '%c' on line %d, character %d", codepoint, line, character);
-            case JSON_ERROR_TRAILING_GARBAGE:
-                return luaL_error(L, "trailing garbage after json string at line %d character %d", line, character);
-            case JSON_ERROR_INVALID_UNICODE:
-                return luaL_error(L, "invalid unicode codepoint found on line %d, character %d", line, character);
+    for (int i = depth - 1; i > 0; --i)
+        cjson_free(&stack[i]);
+    error:
+    if (err) {
+        if (error) {
+            error->error = err;
+            error->codepoint = codepoint;
+            error->line = line;
+            error->column = character;
         }
-    }
-    json_finalize(&stack[0]);
-    json_t* result = lua_newuserdata(L, sizeof(json_t));
-    *result = stack[0];
-    luaL_setmetatable(L, "cjson_object");
-    return 1;
+        cjson_free(&stack[0]);
+        stack[0].type = JSON_NULL;
+    } else
+        json_finalize(&stack[0]);
+    return stack[0];
 }
 
-
-static void cjson_push(lua_State* L, json_t* json) {
+// Lua binidngs.
+static void f_cjson_push(lua_State* L, json_t* json, int value) {
     if (json) {
         switch (json->type) {
             case JSON_ARRAY:
             case JSON_OBJECT: {
-                json_t* value = lua_newuserdata(L, sizeof(json_t*));
-                luaL_setmetatable(L, "cjson_value");
+                json_t* value = lua_newuserdata(L, sizeof(json_t));
+                luaL_setmetatable(L, value ? "cjson_value" : "cjson_object");
                 *value = *json;
             } break;
             case JSON_NULL: lua_pushnil(L); break;
@@ -604,21 +614,22 @@ static void cjson_push(lua_State* L, json_t* json) {
         lua_pushnil(L);
 }
 
-static int cjson_object_gc(lua_State* L) {
+
+static int f_cjson_object_gc(lua_State* L) {
     cjson_free(lua_touserdata(L, 1));
 }
 
-static int cjson_object_index(lua_State* L) {
+static int f_cjson_object_index(lua_State* L) {
     json_t* json = lua_touserdata(L, 1);
     switch (json->type) {
-        case JSON_OBJECT: cjson_push(L, json_get(json, luaL_checkstring(L, 2))); break;
-        case JSON_ARRAY: cjson_push(L, json_index(json, luaL_checkinteger(L, 2) - 1)); break;
+        case JSON_OBJECT: f_cjson_push(L, json_get(json, luaL_checkstring(L, 2)), 1); break;
+        case JSON_ARRAY: f_cjson_push(L, json_index(json, luaL_checkinteger(L, 2) - 1), 1); break;
         default: return luaL_error(L, "invalid index");
     }
     return 1;
 }
 
-static int cjson_object_len(lua_State* L) {
+static int f_cjson_object_len(lua_State* L) {
     json_t* json = lua_touserdata(L, 1);
     switch (json->type) {
         case JSON_OBJECT:
@@ -632,37 +643,61 @@ static int cjson_object_len(lua_State* L) {
 }
 
 
-static int cjson_object_newindex(lua_State* L) {
+static int f_cjson_object_newindex(lua_State* L) {
     json_t* json = lua_touserdata(L, 1);
     return luaL_error(L, "not implemented");
 }
 
 
-static int cjson_object_pairs(lua_State* L) {
+static int f_cjson_object_pairs(lua_State* L) {
     json_t* json = lua_touserdata(L, 1);
     return luaL_error(L, "not implemented");
+}
+
+
+static int f_cjson_encode(lua_State* L) {
+    return 1;
+}
+
+static int f_cjson_decode(lua_State* L) {
+    size_t len;
+    const char* str = luaL_checklstring(L, 1, &len);
+    json_error_t error;
+    json_t value = cjson_decode(str, len, &error);
+    switch (error.error) {
+        case JSON_ERROR_UNEXPECTED_END:
+            return luaL_error(L, "unexepcted end of json string");
+        case JSON_ERROR_INVALID_CHAR:
+            return luaL_error(L, "invalid character found '%c' on line %d, column %d", error.codepoint, error.line, error.column);
+        case JSON_ERROR_TRAILING_GARBAGE:
+            return luaL_error(L, "trailing garbage after json string at line %d column %d", error.line, error.column);
+        case JSON_ERROR_INVALID_UNICODE:
+            return luaL_error(L, "invalid unicode codepoint found on line %d, column %d", error.line, error.column);
+    }
+    f_cjson_push(L, &value, 0);
+    return 1;
 }
 
 static const luaL_Reg cjson_value[] = {
-    { "__index",     cjson_object_index },
-    { "__newindex",  cjson_object_newindex },
-    { "__pairs",     cjson_object_pairs },
-    { "__len",       cjson_object_len },
+    { "__index",     f_cjson_object_index },
+    { "__newindex",  f_cjson_object_newindex },
+    { "__pairs",     f_cjson_object_pairs },
+    { "__len",       f_cjson_object_len },
     { NULL,          NULL             }
 };
 
 static const luaL_Reg cjson_object[] = {
-    { "__gc",        cjson_object_gc   },
-    { "__index",     cjson_object_index },
-    { "__newindex",  cjson_object_newindex },
-    { "__pairs",     cjson_object_pairs },
-    { "__len",       cjson_object_len },
+    { "__gc",        f_cjson_object_gc   },
+    { "__index",     f_cjson_object_index },
+    { "__newindex",  f_cjson_object_newindex },
+    { "__pairs",     f_cjson_object_pairs },
+    { "__len",       f_cjson_object_len },
     { NULL,          NULL             }
 };
 
 static const luaL_Reg cjson_lib[] = {
-  { "encode",    cjson_encode  },
-  { "decode",    cjson_decode  },
+  { "encode",    f_cjson_encode  },
+  { "decode",    f_cjson_decode  },
   { NULL,        NULL }
 };
 
