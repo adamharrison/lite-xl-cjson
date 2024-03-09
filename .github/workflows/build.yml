@@ -31,7 +31,7 @@ jobs:
             gh release delete -y latest || true;
             gh release create -t latest -F NOTES.md latest *.so *.dll
           fi
-    build_macos:
+  build_macos:
     needs: build_linux_android_windows
     runs-on: macos-11
     env:
