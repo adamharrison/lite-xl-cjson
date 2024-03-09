@@ -1,14 +1,24 @@
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
+#ifdef CJSON_STANDALONE
+  #include <lua.h>
+  #include <lauxlib.h>
+  #include <lualib.h>
+#else
+  #define LITE_XL_PLUGIN_ENTRYPOINT
+  #include <lite_xl_plugin_api.h>
+#endif
+       #include <time.h>
+       #include <sys/time.h>
+
+
 
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
 
 #define MAX_NUMBER_LENGTH 32
-#define MAX_DEPTH 256
+#define MAX_DEPTH 512
 #define MAX_BUFFER 1024
+#define SHORT_STRING_SIZE sizeof(long long)
 
 typedef enum json_error_e {
     JSON_ERROR_NONE = 0,
@@ -16,7 +26,8 @@ typedef enum json_error_e {
     JSON_ERROR_INVALID_UNICODE,
     JSON_ERROR_INVALID_NUMBER,
     JSON_ERROR_UNEXPECTED_END,
-    JSON_ERROR_TRAILING_GARBAGE
+    JSON_ERROR_TRAILING_GARBAGE,
+    JSON_ERROR_MAX_DEPTH_EXCEEDED
 } json_error_e;
 
 typedef struct json_error_t {
@@ -55,6 +66,7 @@ typedef struct json_t {
     json_type_e type;
     union {
         char* string;
+        char short_string[SHORT_STRING_SIZE];
         struct json_t* array;
         struct json_t* object;
         double number;
@@ -69,17 +81,20 @@ static void cjson_free(json_t* json) {
         case JSON_ARRAY:
             for (int i = 0; i < json->length; ++i)
                 cjson_free(&json->array[i]);
-            free(json->array);
+            if (json->capacity > 0)
+                free(json->array);
         break;
         case JSON_OBJECT:
             for (int i = 0; i < json->length; ++i) {
                 cjson_free(&json->object[i*2 + 0]);
                 cjson_free(&json->object[i*2 + 1]);
             }
-            free(json->object);
+            if (json->capacity > 0)
+                free(json->object);
         break;
         case JSON_STRING:
-            free(json->string);
+            if (json->capacity != SHORT_STRING_SIZE)
+                free(json->string);
         break;
     }
 }
@@ -87,7 +102,7 @@ static void cjson_free(json_t* json) {
 
 static void json_append(json_t* array, json_t* value) {
     assert(array->type == JSON_ARRAY);
-    if (array->length <= array->capacity) {
+    if (array->length >= array->capacity) {
         if (array->capacity == 0) {
             array->capacity = 2;
             array->array = malloc(array->capacity*sizeof(json_t));
@@ -101,21 +116,37 @@ static void json_append(json_t* array, json_t* value) {
 
 static void json_str_append(json_t* string, const char* data, size_t len) {
     assert(string->type == JSON_STRING);
-    if (string->length <= string->capacity) {
-        if (string->capacity == 0) {
-            string->capacity = 16;
-            string->string = malloc(sizeof(char)*16);
-        } else {
-            string->capacity *= 2;
-            string->string = realloc(string->string, string->capacity*sizeof(char));
+    if (len > 0) {
+        size_t target = string->length + len + 1;
+        int short_string = string->capacity == SHORT_STRING_SIZE;
+        if (target >= string->capacity) {
+            while (string->capacity < target)
+                string->capacity *= 2;
+            if (short_string) {
+                char* str = malloc(string->capacity*sizeof(char));
+                memcpy(str, string->short_string, string->length);
+                string->string = str;
+            } else {
+                string->string = realloc(string->string, string->capacity*sizeof(char));
+            }
+            short_string = 0;
         }
+        char* dst = short_string ? string->short_string : string->string;
+        memcpy(&dst[string->length], data, len);
+        string->length += len;
+        dst[string->length] = 0;
     }
-    memcpy(&string->string[string->length], data, len);
-    string->length += len;
+}
+
+const char* json_string(const json_t* object) {
+    assert(object->type == JSON_STRING);
+    if (object->capacity == SHORT_STRING_SIZE)
+        return object->short_string;
+    return object->string;
 }
 
 static int bsearch_compare(const void* key, const void* item) {
-    return strncmp(key, ((json_t*)item)->string, ((json_t*)item)->length);
+    return strcmp(key, json_string(item));
 }
 
 static json_t* json_get(json_t* object, const char* key) {
@@ -135,7 +166,7 @@ static json_t* json_index(json_t* object, long long index) {
 
 static void json_set(json_t* object, json_t* key, json_t* value) {
     assert(object->type == JSON_OBJECT);
-    if (object->length <= object->capacity) {
+    if (object->length >= object->capacity) {
         if (object->capacity == 0) {
             object->capacity = 2;
             object->object = malloc(object->capacity*sizeof(json_t) * 2);
@@ -150,12 +181,15 @@ static void json_set(json_t* object, json_t* key, json_t* value) {
 }
 
 static int key_sort(const void* a, const void* b) {
-    return strcmp(((json_t*)a)->string, ((json_t*)b)->string);
+    return strcmp(json_string(a), json_string(b));
 }
 
 static void json_finalize(json_t* object) {
     switch (object->type) {
-        case JSON_OBJECT: qsort(object->object, object->length, sizeof(json_t)*2, key_sort); break;
+        case JSON_OBJECT:
+            if (object->length > 1)
+                qsort(object->object, object->length, sizeof(json_t)*2, key_sort);
+        break;
     }
 }
 
@@ -298,7 +332,7 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
             case MODE_NEXT:
             case MODE_VALUE: {
                 buffer_length = 0;
-                switch (codepoint) {
+                switch ((char)codepoint) {
                     case '\n': newline = 1; break;
                     case ' ':
                     case '\t':
@@ -328,7 +362,8 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
                     case '7':
                     case '8':
                     case '9':
-                    case '-': {
+                    case '-':
+                    case '+': {
                         stack[++depth].type = JSON_INTEGER;
                         buffer[buffer_length++] = codepoint;
                         mode = MODE_NUMBER;
@@ -336,22 +371,30 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
                     case '"': {
                         json_t* str = &stack[++depth];
                         str->type = JSON_STRING;
-                        str->capacity = 0;
+                        str->capacity = SHORT_STRING_SIZE;
                         str->length = 0;
                         mode = key ? MODE_KEY : MODE_STRING;
                     } break;
                     case '[': {
-                        json_t* array = &stack[++depth];
-                        array->type = JSON_ARRAY;
-                        array->length = 0;
-                        array->capacity = 0;
+                        if (depth < MAX_DEPTH - 1) {
+                            json_t* array = &stack[++depth];
+                            array->type = JSON_ARRAY;
+                            array->length = 0;
+                            array->capacity = 0;
+                            mode = MODE_NEXT;
+                        } else
+                            err = JSON_ERROR_MAX_DEPTH_EXCEEDED;
                     } break;
                     case '{': {
-                        json_t* obj = &stack[++depth];
-                        obj->type = JSON_OBJECT;
-                        obj->length = 0;
-                        obj->capacity = 0;
-                        key = 1;
+                        if (depth < MAX_DEPTH - 2) {
+                            json_t* obj = &stack[++depth];
+                            obj->type = JSON_OBJECT;
+                            obj->length = 0;
+                            obj->capacity = 0;
+                            key = 1;
+                            mode = MODE_NEXT;
+                        } else
+                            err = JSON_ERROR_MAX_DEPTH_EXCEEDED;
                     } break;
                     case ',': {
                         if (mode != MODE_NEXT)
@@ -396,7 +439,6 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
                             if (sscanf(utf8_buffer, "%x", &utf8_codepoint) == 1) {
                                 int length = codepoint_to_utf8(&buffer[buffer_length], utf8_codepoint);
                                 if (length > 0) {
-                                    fprintf(stderr, "BUF: %d %d\n", buffer[buffer_length], length);
                                     buffer_length += length;
                                     mode = MODE_STRING;
                                 } else
@@ -463,6 +505,10 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
                 }
                 if (codepoint != '\\')
                     slash_count = 0;
+                if (buffer_length >= MAX_BUFFER - 8) {
+                    json_str_append(&stack[depth], buffer, buffer_length);
+                    buffer_length = 0;
+                }
                 if (!err && terminate) {
                     json_str_append(&stack[depth], buffer, buffer_length);
                     if (mode == MODE_KEY) {
@@ -516,7 +562,7 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
                         }
                     break;
                     case ',':
-                        mode = MODE_VALUE;
+                        mode = MODE_NEXT;
                     break;
                     case ']':
                         mode = MODE_NEXT;
@@ -526,7 +572,7 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
                     break;
                     case '}':
                         mode = MODE_NEXT;
-                        if (stack[depth - 1].type != JSON_OBJECT)
+                        if (depth <= 1 || stack[depth - 2].type != JSON_OBJECT)
                             err = JSON_ERROR_INVALID_CHAR;
                         ++terminate;
                     break;
@@ -535,9 +581,9 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
                 if (mode == MODE_NUMBER && err == JSON_ERROR_NONE && buffer_length > MAX_NUMBER_LENGTH)
                     err = JSON_ERROR_INVALID_NUMBER;
                 else if (mode != MODE_NUMBER && err == JSON_ERROR_NONE) {
-                     if (stack[depth - 1].type != JSON_ARRAY && stack[depth - 1].type != JSON_OBJECT)
+                     if (stack[depth - 1].type != JSON_ARRAY && !(depth > 1 && stack[depth - 2].type == JSON_OBJECT)) {
                         err = JSON_ERROR_INVALID_CHAR;
-                    else {
+                    } else {
                         buffer[buffer_length] = 0;
                         if (json_parse_number(&stack[depth], buffer)) {
                             ++terminate;
@@ -575,8 +621,14 @@ static json_t cjson_decode(const char* str, size_t len, json_error_t* error) {
     if (err == JSON_ERROR_NONE) {
         if (depth >= 0)
             err = JSON_ERROR_UNEXPECTED_END;
-        else if (str < end)
-            err = JSON_ERROR_TRAILING_GARBAGE;
+        else if (str < end) {
+            do {
+                if (*str != ' ' && *str != '\n' && *str != '\0') {
+                    err = JSON_ERROR_TRAILING_GARBAGE;
+                    break;
+                }
+            } while (++str < end);
+        }
     }
     for (int i = depth - 1; i > 0; --i)
         cjson_free(&stack[i]);
@@ -608,7 +660,7 @@ static void f_cjson_push(lua_State* L, json_t* json, int value) {
             case JSON_NULL: lua_pushnil(L); break;
             case JSON_DOUBLE: lua_pushnumber(L, json->number); break;
             case JSON_INTEGER: lua_pushinteger(L, json->integer); break;
-            case JSON_STRING: lua_pushlstring(L, json->string, json->length); break;
+            case JSON_STRING: lua_pushlstring(L, json_string(json), json->length); break;
         }
     } else
         lua_pushnil(L);
@@ -675,6 +727,8 @@ static int f_cjson_decode(lua_State* L) {
             return luaL_error(L, "invalid unicode codepoint found on line %d, column %d", error.line, error.column);
     }
     f_cjson_push(L, &value, 0);
+    if (value.type == JSON_STRING)
+        cjson_free(&value);
     return 1;
 }
 
@@ -695,13 +749,40 @@ static const luaL_Reg cjson_object[] = {
     { NULL,          NULL             }
 };
 
+static double get_time() {
+   #if _WIN32 // Fuck I hate windows jesus chrsit.
+    LARGE_INTEGER LoggedTime, Frequency;
+    QueryPerformanceFrequency(&Frequency);
+    QueryPerformanceCounter(&LoggedTime);
+    return LoggedTime.QuadPart / (double)Frequency.QuadPart;
+  #else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1000000000.0;
+  #endif
+}
+
+static int lpm_time(lua_State* L) {
+  lua_pushnumber(L, get_time());
+  return 1;
+}
+
+
+
 static const luaL_Reg cjson_lib[] = {
   { "encode",    f_cjson_encode  },
   { "decode",    f_cjson_decode  },
+  { "time",    lpm_time  },
   { NULL,        NULL }
 };
 
+
+#ifndef CJSON_STANDALONE
+int luaopen_lite_xl_cjson(lua_State* L, void* XL) {
+  lite_xl_plugin_init(XL);
+#else
 int luaopen_cjson(lua_State* L) {
+#endif
     luaL_newmetatable(L, "cjson_object");
     luaL_setfuncs(L, cjson_object, 0);
     luaL_newmetatable(L, "cjson_value");
@@ -709,4 +790,18 @@ int luaopen_cjson(lua_State* L) {
     lua_newtable(L);
     luaL_setfuncs(L, cjson_lib, 0);
     return 1;
+}
+
+int main(int argc, char* argv[]) {
+    FILE* file = fopen("/home/adam/Work/search-core/t/products250.json", "rb");
+    fseek(file, 0, SEEK_END);
+    long long length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    char* buffer = malloc(sizeof(char)*(length+1));
+    fread(buffer, sizeof(char), length, file);
+    fclose(file);
+    buffer[length] = 0;
+    fprintf(stderr, "TIME: %f\n", get_time());
+    json_t result = cjson_decode(buffer, length, NULL);
+    fprintf(stderr, "TIME: %f\n", get_time());
 }
