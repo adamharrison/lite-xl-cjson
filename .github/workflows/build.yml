@@ -1,0 +1,63 @@
+name: CI
+on: { push: { branches: [master] } }
+jobs:
+  build_linux_android_windows:
+    runs-on: ubuntu-latest
+    environment: Release
+    defaults: { run: { shell: bash } }
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with: { fetch-depth: 0 }
+      - name: Set Environment Variables
+        run: |
+          git config --global user.name "Github Actions" && git config --global user.email "adamdharrison@gmail.com"
+          echo VERSION=`git describe --tags --abbrev=0 --match "v*" | tail -c +2` >> $GITHUB_ENV && echo FULL_VERSION=`git describe --tags --match "v*" | tail -c +2` >> $GITHUB_ENV && echo REV=$((`git describe --tags  --match "v*" | sed 's/.*-\([0-9]*\)-.*/\1/' | sed s/^v.*//` + 1)) >> $GITHUB_ENV
+      - name: Clone Submodules
+        run: git submodule update --init --depth=1
+      - name: Build Linux & Windows
+        run: |
+          sudo apt-get install mingw-w64
+          ./build.sh clean && BIN=cjson.x86_64-linux.so ./build.sh
+          ./build.sh clean && BIN=cjson.x86_64-windows.dll CC=x86_64-w64-mingw32-gc ./build.sh
+      - name: Create Release(s)
+        env: { GITHUB_TOKEN: "${{ github.token }}" }
+        run: |
+          perl -pe 'last if $_ =~ m/^\s*#/ && $_ !~ m/#\s*$ENV{VERSION}/' < CHANGELOG.md | tail -n +2 > NOTES.md
+          gh release delete -y continuous || true; gh release create -t 'Continuous Release' -F NOTES.md continuous *.so *.dll
+          if [[ `git tag --points-at HEAD v* | head -c 1` == "v" ]]; then
+            gh release delete -y v$VERSION || true;
+            gh release create -t v$VERSION -F NOTES.md v$VERSION *.so *.dll
+            gh release delete -y latest || true;
+            gh release create -t latest -F NOTES.md latest *.so *.dll
+          fi
+    build_macos:
+    needs: build_linux_android_windows
+    runs-on: macos-11
+    env:
+      CC: clang
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with: { fetch-depth: 0 }
+      - name: Set Environment Variables
+        run: echo VERSION=`git describe --tags --abbrev=0  --match "v*" | tail -c +2` >> $GITHUB_ENV && echo FULL_VERSION=`git describe --tags --match "v*" | tail -c +2` >> $GITHUB_ENV && echo REV=$((`git describe --tags  --match "v*" | sed 's/.*-\([0-9]*\)-.*/\1/' | sed s/^v.*//` + 1)) >> $GITHUB_ENV
+      - name: Clone Submodules
+        run: git submodule update --init --depth=1
+      - name: Build MacOS
+        env: { GITHUB_TOKEN: "${{ github.token }}" }
+        run: |
+          ./build.sh clean && BIN=cjson.x86_64-darwin.so ./build.sh
+          ./build.sh clean && BIN=cjson.aarch64-darwin.so CC=clang CFLAGS="-arch arm64" ./build.sh
+          gh release upload continuous *.so
+          if [[ `git tag --points-at HEAD v* | head -c 1` == "v" ]]; then
+            gh release upload v$VERSION *.so
+            gh release upload latest *.so
+            git branch -f latest HEAD
+            git tag -f latest
+            git push -f origin refs/heads/latest
+            git push -f origin refs/tags/latest
+          fi
+          git tag -f continuous
+          git push -f origin refs/tags/continuous
+
