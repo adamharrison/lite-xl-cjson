@@ -23,7 +23,12 @@ typedef struct json_t {
 
 
 static cJSON* lua_tocjson(lua_State* L, int index) {
-  json_t* value = luaL_testudata(L, index, "cjson");
+  if (lua_type(L, index) != LUA_TTABLE)
+    return NULL;
+  lua_pushliteral(L, "__cjson");
+  lua_rawget(L, index);
+  json_t* value = lua_touserdata(L, -1);
+  lua_pop(L, 1);
   return value ? value->json : NULL;
 }
 
@@ -48,10 +53,14 @@ static int lua_pushcjson(lua_State* L, cJSON* json, json_unfold_e unfold) {
             }
           }
         } else {
-          json_t* value = lua_newuserdata(L, sizeof(json_t));
-          luaL_setmetatable(L, "cjson");
+          json_t* value = malloc(sizeof(json_t));
           value->json = json;
-          value->allocated = unfold == UNFOLD_NODE;
+          value->allocated = unfold == UNFOLD_NODE ? 1 : 0;
+          lua_newtable(L);
+          luaL_setmetatable(L, "cjson");
+          lua_pushliteral(L, "__cjson");
+          lua_pushlightuserdata(L, value);
+          lua_rawset(L, -3);
         }
       } break;
       case cJSON_Number: lua_pushnumber(L, cJSON_GetNumberValue(json)); break;
@@ -107,9 +116,13 @@ static cJSON* f_cjson_parse(lua_State* L, int index) {
 
 
 static int f_cjson_gc(lua_State* L) {
-  json_t* value = lua_touserdata(L, 1);
+  lua_pushliteral(L, "__cjson");
+  lua_rawget(L, -2);
+  json_t* value = lua_touserdata(L, -1);
   if (value->allocated)
     cJSON_Delete(value->json);
+  free(value);
+  return 0;
 }
 
 
