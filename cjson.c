@@ -128,6 +128,7 @@ static int f_cjson_len(lua_State* L) {
     cJSON* json = lua_tocjson(L, 1);
     switch (json->type) {
         case cJSON_Array: lua_pushinteger(L, cJSON_GetArraySize(json)); break;
+        case cJSON_Object: lua_pushinteger(L, 0); break;
         default: return luaL_error(L, "length operation invalid");
     }
     return 1;
