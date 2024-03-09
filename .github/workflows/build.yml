@@ -18,9 +18,9 @@ jobs:
       - name: Build Linux & Windows
         run: |
           sudo apt-get install mingw-w64 gcc-11-aarch64-linux-gnu
-          ./build.sh clean && BIN=cjson.x86_64-linux.so ./build.sh
-          ./build.sh clean && BIN=cjson.aarch64-linux.so CC=aarch64-linux-gnu-gcc-11 ./build.sh
-          ./build.sh clean && BIN=cjson.x86_64-windows.dll CC=x86_64-w64-mingw32-gcc ./build.sh
+          ./build.sh clean && BIN=cjson.x86_64-linux.so ./build.sh -O3
+          ./build.sh clean && BIN=cjson.aarch64-linux.so CC=aarch64-linux-gnu-gcc-11 ./build.sh -O3
+          ./build.sh clean && BIN=cjson.x86_64-windows.dll CC=x86_64-w64-mingw32-gcc ./build.sh -O3
       - name: Create Release(s)
         env: { GITHUB_TOKEN: "${{ github.token }}" }
         run: |
@@ -48,8 +48,8 @@ jobs:
       - name: Build MacOS
         env: { GITHUB_TOKEN: "${{ github.token }}" }
         run: |
-          ./build.sh clean && BIN=cjson.x86_64-darwin.so ./build.sh
-          ./build.sh clean && BIN=cjson.aarch64-darwin.so CC=clang CFLAGS="-arch arm64" ./build.sh
+          ./build.sh clean && BIN=cjson.x86_64-darwin.so ./build.sh -O3
+          ./build.sh clean && BIN=cjson.aarch64-darwin.so CC=clang CFLAGS="-arch arm64" ./build.sh -O3
           gh release upload continuous *.so
           if [[ `git tag --points-at HEAD v* | head -c 1` == "v" ]]; then
             gh release upload v$VERSION *.so

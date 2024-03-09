@@ -1,3 +1,7 @@
+## v0.3
+
+* Added optimizations in.
+
 ## v0.2
 
 * First stable implementation?
