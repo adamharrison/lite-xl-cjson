@@ -19,7 +19,7 @@ jobs:
         run: |
           sudo apt-get install mingw-w64
           ./build.sh clean && BIN=cjson.x86_64-linux.so ./build.sh
-          ./build.sh clean && BIN=cjson.x86_64-windows.dll CC=x86_64-w64-mingw32-gc ./build.sh
+          ./build.sh clean && BIN=cjson.x86_64-windows.dll CC=x86_64-w64-mingw32-gcc ./build.sh
       - name: Create Release(s)
         env: { GITHUB_TOKEN: "${{ github.token }}" }
         run: |
