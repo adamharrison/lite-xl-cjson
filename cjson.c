@@ -7,8 +7,8 @@
   #include <lite_xl_plugin_api.h>
 #endif
 
-#include "cJSON.h"
-#include "cJSON.c"
+#include <cJSON.h>
+#include <cJSON.c>
 
 typedef enum json_unfold_e {
   UNFOLD_VALUE, // Unfold without garbage collection.
