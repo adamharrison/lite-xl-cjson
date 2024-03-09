@@ -172,22 +172,10 @@ static int f_cjson_next(lua_State* L) {
 }
 
 
-static int f_cjson_inext(lua_State* L) {
-  cJSON* json = lua_tocjson(L, 1);
-  int index = !lua_isnil(L, 2) ? lua_tointeger(L, 2) : 0;
-  int length = cJSON_GetArraySize(json);
-  if (index >= length)
-    return 0;
-  lua_pushinteger(L, index + 1);
-  lua_pushcjson(L, cJSON_GetArrayItem(json, index), UNFOLD_VALUE);
-  return 2;
-}
-
-
 static int f_cjson_pairs(lua_State* L) {
   cJSON* json = lua_tocjson(L, 1);
-  if (json->type != cJSON_Array)
-    return luaL_error(L, "invalid value for ipairs");
+  if (json->type != cJSON_Object)
+    return luaL_error(L, "invalid value for pairs");
   lua_pushcfunction(L, f_cjson_next);
   json_object_iterator_t* iterator = lua_newuserdata(L, sizeof(json_object_iterator_t));
   iterator->json = json;
@@ -197,22 +185,11 @@ static int f_cjson_pairs(lua_State* L) {
 }
 
 
-static int f_cjson_ipairs(lua_State* L) {
-  cJSON* json = lua_tocjson(L, 1);
-  if (json->type != cJSON_Array)
-    return luaL_error(L, "invalid value for ipairs");
-  lua_pushcfunction(L, f_cjson_inext);
-  lua_pushvalue(L, 1);
-  lua_pushinteger(L, 0);
-  return 3;
-}
-
 static const luaL_Reg cjson_value[] = {
   { "__gc",        f_cjson_gc   },
   { "__index",     f_cjson_index },
   { "__newindex",  f_cjson_newindex },
   { "__pairs",     f_cjson_pairs },
-  { "__ipairs",    f_cjson_ipairs },
   { "__len",       f_cjson_len },
   { NULL,          NULL             }
 };
